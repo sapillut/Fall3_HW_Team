@@ -1,0 +1,179 @@
+---
+title: 'ML HW #1 Final'
+author: "Satya Munugoti"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+---
+title: 'ML HW #1'
+author: "Satya Munugoti"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+train <- read.csv("/Users/satya/Documents/MSA 24-25/Fall 3/Machine Learning/Homework1_ML/insurance_t.csv")
+```
+```{r}
+library(tidyverse)
+library(DataExplorer)
+library(DescTools)
+library(earth)
+```
+
+Indicators & any variable with < 10 distinct values are categorical
+```{r}
+table((train$MMCRED))
+table((train$CCPURC))
+```
+
+Categorical variables
+```{r}
+# ordinal
+train$MMCRED <-as.factor(train$MMCRED)
+train$CCPURC <- as.factor(train$CCPURC)
+
+# binary
+train$DDA <- as.factor(train$DDA)
+train$DIRDEP <- as.factor(train$DIRDEP)
+train$NSF <- as.factor(train$NSF)
+train$SAV <- as.factor(train$SAV)
+train$ATM <- as.factor(train$ATM)
+train$CD <- as.factor(train$CD)
+train$IRA <- as.factor(train$IRA)
+train$INV <- as.factor(train$INV)
+train$MM <- as.factor(train$MM)
+train$CC <- as.factor(train$CC)
+train$SDB <- as.factor(train$SDB)
+train$INAREA <- as.factor(train$INAREA)
+train$CCPURC <- as.factor(train$CCPURC)
+
+# target variable
+train$INS <- as.factor(train$INS)
+```
+
+```{r}
+plot_missing(train)
+```
+Imputation
+```{r}
+# median for continuous
+train <- train %>%
+  mutate(across(where(is.numeric), ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+
+# mode for categorical (CC, INV)
+train <- train %>%
+  mutate(CC = ifelse(is.na(CC), Mode(CC, na.rm = TRUE), CC))
+train <- train %>%
+  mutate(INV = ifelse(is.na(INV), Mode(INV, na.rm = TRUE), INV))
+train <- train %>%
+  mutate(CCPURC = ifelse(is.na(CCPURC), Mode(CCPURC, na.rm = TRUE), CCPURC))
+
+```
+```{r}
+plot_missing(train)
+```
+                 
+MARS Model
+```{r}
+set.seed(123)
+mars_model <- earth(INS ~ ., data = train, 
+                    glm = list(family = binomial()), 
+                    nfold = 10,                      # no of folds for cross-validation
+                    trace = 1,                       # show progress
+                    pmethod = "cv")                  # cross-validation method for model selection
+
+# View a summary of the model
+summary(mars_model)
+```
+```{r}
+# variable importance
+evimp(mars_model)
+```
+SAVBAL, CDBAL are the two most important - similar to findings in last report
+```{r}
+library(ROCit)
+
+
+train$p_hat <- as.vector(predict(mars_model, type = "response"))
+
+
+train$INS <- factor(train$INS, levels = c(0, 1))
+
+
+logit_roc <- rocit(score = train$p_hat, class = train$INS)
+
+auc_value <- ciAUC(logit_roc, level = 0.99)
+
+cat("AUC:", auc_value$AUC, "\n")
+cat("Confidence Interval:", auc_value$lower, "-", auc_value$upper, "\n")
+
+plot(logit_roc, main = "ROC Curve")
+# cutoff point
+plot(logit_roc)$optimal
+```
+
+
+
+  
+```{r}
+# Load necessary libraries
+library(mgcv)
+library(ROCit)
+
+# Build the GAM model with a categorical response
+# Adjusting the family to binomial for a binary outcome
+set.seed(123)
+sel.gam2 <- mgcv::gam(INS ~ 
+                   s(ACCTAGE) + s(DDABAL) + s(DEPAMT) + s(NSFAMT) + s(CHECKS) + s(PHONE) + s(TELLER) + s(SAVBAL) +
+                   s(ATMAMT) + s(POS) + s(POSAMT) + s(CDBAL) + s(IRABAL) + s(INVBAL) + s(MMBAL) + s(CCBAL) + s(INCOME) + s(LORES) + 
+                  s(HMVAL) + s(AGE) + s(CRSCORE) + factor(DDA) +factor(DEP) +factor(DIRDEP) + factor(NSF) + factor(SAV) + 
+                  factor(ATM) + factor(CD)+ factor(IRA) + factor(INV) + factor(MM) + factor(MMCRED) + factor(CC) + factor(SDB) +
+                  factor(INAREA) + factor(BRANCH) + factor(CCPURC), 
+                 family = binomial(),  # Set family to binomial for binary response
+                 method = 'REML', 
+                 select = TRUE, 
+                 data = train)
+
+# Summary of the GAM model
+summary(sel.gam2)
+```
+```{r}
+# for overall p-values for categorical varibales
+mgcv::anova.gam(sel.gam2)
+```
+
+```{r}
+#GAM Model w/ Splines (Only significant variables p < 0.05)
+gam_model2 <- gam(INS ~ s(ACCTAGE) + s(SAVBAL) + s(MMBAL) + s(DDABAL) + s(CHECKS) + s(ATMAMT) + s(TELLER) + 
+                    CD + DDA + IRA + CC + INV + BRANCH,
+                 data = train, family = binomial)
+summary(gam_model2)
+```
+```{r}
+mgcv::anova.gam(gam_model2)
+```
+
+```{r}
+train$p_hat <- as.vector(predict(gam_model2, type = "response"))
+
+
+train$INS <- factor(train$INS, levels = c(0, 1))
+
+
+logit_roc <- rocit(score = train$p_hat, class = train$INS)
+
+auc_value <- ciAUC(logit_roc, level = 0.99)
+
+cat("AUC:", auc_value$AUC, "\n")
+cat("Confidence Interval:", auc_value$lower, "-", auc_value$upper, "\n")
+
+plot(logit_roc, main = "ROC Curve")
+# cutoff point
+plot(logit_roc)$optimal
+```
+
+
+
+
