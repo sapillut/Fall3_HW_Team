@@ -5,13 +5,6 @@ date: "`r Sys.Date()`"
 output: html_document
 ---
 
----
-title: 'ML HW #1'
-author: "Satya Munugoti"
-date: "`r Sys.Date()`"
-output: html_document
----
-
 ```{r}
 train <- read.csv("/Users/satya/Documents/MSA 24-25/Fall 3/Machine Learning/Homework1_ML/insurance_t.csv")
 ```
@@ -140,7 +133,7 @@ sel.gam2 <- mgcv::gam(INS ~
 summary(sel.gam2)
 ```
 ```{r}
-# for overall p-values for categorical varibales
+# for overall p-values for categorical variables
 mgcv::anova.gam(sel.gam2)
 ```
 
