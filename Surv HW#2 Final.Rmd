@@ -1,0 +1,221 @@
+---
+title: "Casper_Surv_HW2"
+output: html_notebook
+---
+
+
+```{r setup - libraries}
+library(aws.s3)
+library(tidyverse)
+library(survival)
+library(survminer)
+library(flexsurv)
+library(ggtext)
+```
+
+```{r}
+theme_faves <- function(){
+  
+  theme(
+    
+    plot.title = element_text(face = "bold", hjust = 0.5, color = "black"),
+    axis.title.x = element_text(size=14, face="bold", color = "black"),
+    axis.title.y = element_text(size=14, face="bold", color = "black", margin = margin(r = 10)),
+    axis.text.x = element_text(size=12, color = "black"),
+    axis.text.y = element_text(size=12, color = "black"),
+    panel.border = element_rect(color = "black", fill=NA, linewidth=0.5),
+    legend.text = element_text(size=12),
+    legend.title = element_blank(),
+    #legend.position = "inside",
+    legend.background=element_rect(fill = alpha("white", 100), color = "black")
+    
+  )
+}
+```
+
+```{r setup - pull data from AWS}
+#Finding the AWS S3 bucket
+bucket_exists(
+  bucket = "s3://survival2024/",
+  region = "us-east-1"
+)
+
+files <- get_bucket_df(
+  bucket = "s3://survival2024/",
+  region = "us-east-1",
+  max = 20000
+) %>%
+  as_tibble()
+
+#Downloading files
+save_object(
+  object = "hurricane.csv",
+  bucket = "s3://survival2024/",
+  region = "us-east-1",
+  file = "hurricane"
+)
+
+hurricane <- read.csv("hurricane")
+```
+
+```{r flood model - redefine target}
+# create new variable for flood events, and censor the rest
+flood_only <- hurricane %>%
+  mutate(flood = ifelse(reason == 1, 1, 0)) %>%
+  select(flood, hour, backup, age, bridgecrane, 
+         servo, gear, slope, elevation, trashrack)
+```
+
+```{r flood model - best dist - default plot}
+flood_w <- flexsurvreg(Surv(time=hour, event=flood) ~ .,
+                         data=flood_only, dist='weibull')
+
+plot(flood_w, type='cumhaz', ci=TRUE, conf.int = FALSE, las=1, bty='n',
+     xlab= 'Hour', ylab = 'Cumulative Hazard', main = 'Weibull Distribution')
+```
+Based on graphical: 
+Weibull > Log-Logistic > Gamma > Exponential 
+
+```{r flood model - best dist - a better plot}
+# get the cumulative hazard function from the data
+flood_simple <- survfit(Surv(time=hour, event=flood)~1, data=flood_only)
+flood_simple_data <- summary(flood_simple)
+
+# get the estimated cumulative hazard function from the survreg object
+cumhaz_data_est <- summary(flood_w, type='cumhaz', ci=TRUE)
+cumhaz_df <- do.call(rbind, lapply(cumhaz_data_est, as.data.frame))
+
+# make some magic
+ggplot() +
+  geom_line(aes(x=cumhaz_df$time, y=cumhaz_df$est, color = 'Weibull'), linewidth = 1) +
+  geom_line(aes(x=cumhaz_df$time, y=cumhaz_df$lcl), color='red', linewidth = 1, linetype='dashed') +
+  geom_line(aes(x=cumhaz_df$time, y=cumhaz_df$ucl), color='red', linewidth = 1, linetype='dashed') +
+  geom_line(aes(x=flood_simple_data$time, y=flood_simple_data$cumhaz, color = 'Actual'), linewidth=1) + 
+  geom_ribbon(aes(x = cumhaz_df$time, ymin = cumhaz_df$lcl, ymax = cumhaz_df$ucl), fill = "red", alpha = 0.1) +
+  labs(
+    x = 'Hour',
+    y = 'Cumulative Hazard'
+  ) +
+  scale_color_manual(values=c('Actual' = 'black', 'Weibull' = 'red')) +
+  theme_faves()
+```
+
+
+```{r flood model - best dist - test}
+# some log-likelihood tests to support our decision to use Weibull
+like.e <- flexsurvreg(Surv(time=hour, event=flood) ~ .,
+                         data=flood_only, dist='exp')$loglik
+like.w <- flexsurvreg(Surv(time=hour, event=flood) ~ .,
+                         data=flood_only, dist='weibull')$loglik
+like.g <- flexsurvreg(Surv(time=hour, event=flood) ~ .,
+                         data=flood_only, dist='gamma')$loglik
+like.log <- flexsurvreg(Surv(time=hour, event=flood) ~ .,
+                         data=flood_only, dist='llogis')$loglik
+
+loglikes <- tibble(
+  dist = c('exp', 'weibull', 'gamma', 'lnorm'),
+  log_likelihood = c(like.e, like.w, like.g, like.log))
+```
+Log-Likelihood supports Weibull as well. 
+
+```{r flood model - variable selection}
+# backwards stepwise regression with alpha = 0.03
+full_model <- survreg(Surv(time=hour, event=flood) ~ .,
+                         data=flood_only, dist='weibull')
+empty_model <- survreg(Surv(time=hour, event=flood) ~ 1,
+                       data=flood_only, dist='weibull')
+
+best_model <- step(full_model,
+                   scope = list(lower = empty_model, 
+                                upper = full_model),
+                   direction = "backward", k=qchisq(0.03, 1, lower.tail=FALSE))
+
+summary(best_model)
+```
+
+```{r flood model - predict new times for variables}
+# model defined after variable selection
+flood_model <- survreg(Surv(time=hour, event=flood) ~ backup + slope + servo,
+                       data = flood_only,
+                       dist = 'weibull')
+
+# probability of a pump surviving a flood event with given variables
+survprob_actual <- 1 - psurvreg(flood_only$hour,
+                                mean = predict(flood_model, type='lp'),
+                                scale = flood_model$scale,
+                                distribution = flood_model$dist)
+
+# define new time if servo = 1
+new_time_servo <- qsurvreg(1-survprob_actual, 
+                     mean = predict(flood_model, type='lp') + 
+                       coef(flood_model)['servo'],
+                     scale = flood_model$scale,
+                     distribution = flood_model$dist)
+
+# define new time if backup = 1
+new_time_backup <- qsurvreg(1-survprob_actual, 
+                     mean = predict(flood_model, type='lp') + 
+                       coef(flood_model)['backup'],
+                     scale = flood_model$scale,
+                     distribution = flood_model$dist)
+
+
+# calculate difference given an alternate universe where these variables = 1
+diff_servo <- new_time_servo - flood_only$hour
+diff_backup <- new_time_backup - flood_only$hour
+
+
+# package results in a data.frame
+diff_df <- data.frame(hour=flood_only$hour,
+                      flood=flood_only$flood, 
+                      servo=flood_only$servo,
+                      backup=flood_only$backup,
+                      diff_servo=diff_servo,
+                      diff_backup=diff_backup) %>% 
+  mutate(index = row_number()) %>%
+  relocate(index)
+
+```
+
+```{r flood model - build upgrade dataframe}
+
+# calculating what upgrades are best
+impact_df <- diff_df %>%
+  mutate(max_impact = pmax(diff_servo, diff_backup, na.rm=T)) %>% # calculate row wise max of time difference
+  filter(flood == 1 & max_impact > 0) %>% # filter for pumps that had flood target and a positive impact 
+  # save which upgrade had the best impact
+  mutate(upgrade = case_when(
+    max_impact == backup ~ 'backup',
+    max_impact == servo ~ 'servo',
+    .default = NA)
+  )
+
+# define costs to upgrade
+upgrade_costs <- data.frame(
+  upgrade = c('backup', 'bridgecrane', 'elevation', 'gear', 'servo'),
+  cost = c(100, 50, 10, 75, 150)
+)
+
+# left-join the costs to impact_df
+impact_df2 <- impact_df2 %>%
+  left_join(upgrade_costs, by='upgrade')
+
+# how much to upgrade all the pumps?
+cat('Total cost of all pump upgrades: ', sum(impact_df2$cost*1000), '\n')
+
+```
+
+```{r flood model - truncate upgrade dataframe}
+# our budget is 2.5 mil, not enough to upgrade everything
+
+# sort data by maximum impact, then truncate the pump list
+pumps_to_upgrade <-  impact_df2 %>%
+  arrange(desc(max_impact)) %>% 
+  head(16) # changing this number until we get under 2.5 mil
+
+cat('Cost of subset pump upgrades: ', sum(pumps_to_upgrade$cost*1000), '\n')
+cat('Total pump life extended by upgrades: ', 
+    round(sum(pumps_to_upgrade$max_impact), 2), 'hours \n')
+```
+
+
