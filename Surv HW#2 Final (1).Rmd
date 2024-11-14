@@ -20,7 +20,7 @@ theme_faves <- function(){
     
     plot.title = element_text(face = "bold", hjust = 0.5, color = "black"),
     axis.title.x = element_text(size=14, face="bold", color = "black"),
-    axis.title.y = element_text(size=14, face="bold", color = "black", margin = margin(r = 10)),
+    axis.title.y = element_text(size=14, face="bold", color = "black"),
     axis.text.x = element_text(size=12, color = "black"),
     axis.text.y = element_text(size=12, color = "black"),
     panel.border = element_rect(color = "black", fill=NA, linewidth=0.5),
@@ -70,27 +70,29 @@ flood_only <- hurricane %>%
 flood_w <- flexsurvreg(Surv(time=hour, event=flood) ~ .,
                          data=flood_only, dist='weibull')
 
-plot(flood_w, type='cumhaz', ci=TRUE, conf.int = FALSE, las=1, bty='n',
-     xlab= 'Hour', ylab = 'Cumulative Hazard', main = 'Weibull Distribution')
+test_plot <- plot(flood_w, type='cumhaz', ci=TRUE, conf.int = FALSE, las=1, bty='n',
+     xlab= 'Hour', ylab = 'Cumulative Hazard', main = 'Weibull Distribution', xlim=c(0, 50))
+
 ```
 Based on graphical: 
 Weibull > Log-Logistic > Gamma > Exponential 
 
 ```{r flood model - best dist - a better plot}
 # get the cumulative hazard function from the data
-flood_simple <- survfit(Surv(time=hour, event=flood)~1, data=flood_only)
-flood_simple_data <- summary(flood_simple)
+surv_obj <- Surv(time = flood_only$hour, event = flood_only$flood)
+cox_model <- coxph(surv_obj ~ 1, data = flood_only)
+baseline_hazard <- basehaz(cox_model, centered = FALSE)
 
 # get the estimated cumulative hazard function from the survreg object
 cumhaz_data_est <- summary(flood_w, type='cumhaz', ci=TRUE)
 cumhaz_df <- do.call(rbind, lapply(cumhaz_data_est, as.data.frame))
 
 # make some magic
-ggplot() +
+dist_plot <- ggplot() +
   geom_line(aes(x=cumhaz_df$time, y=cumhaz_df$est, color = 'Weibull'), linewidth = 1) +
   geom_line(aes(x=cumhaz_df$time, y=cumhaz_df$lcl), color='red', linewidth = 1, linetype='dashed') +
   geom_line(aes(x=cumhaz_df$time, y=cumhaz_df$ucl), color='red', linewidth = 1, linetype='dashed') +
-  geom_line(aes(x=flood_simple_data$time, y=flood_simple_data$cumhaz, color = 'Actual'), linewidth=1) + 
+  geom_step(aes(x=baseline_hazard$time, y=baseline_hazard$hazard, color = 'Actual'), linewidth=1) + 
   geom_ribbon(aes(x = cumhaz_df$time, ymin = cumhaz_df$lcl, ymax = cumhaz_df$ucl), fill = "red", alpha = 0.1) +
   labs(
     x = 'Hour',
@@ -98,6 +100,8 @@ ggplot() +
   ) +
   scale_color_manual(values=c('Actual' = 'black', 'Weibull' = 'red')) +
   theme_faves()
+
+ggsave('distribution.png', dist_plot, height=4.5, width=7.5)
 ```
 
 
@@ -113,8 +117,11 @@ like.log <- flexsurvreg(Surv(time=hour, event=flood) ~ .,
                          data=flood_only, dist='llogis')$loglik
 
 loglikes <- tibble(
-  dist = c('exp', 'weibull', 'gamma', 'lnorm'),
-  log_likelihood = c(like.e, like.w, like.g, like.log))
+  dist = c('exp', 'weibull', 'gamma', 'lnorm'))
+  
+# check if weibull v. gamma  
+pval.w.g = pchisq((-2*(like.w-like.g)), 1, lower.tail=F)
+print(pval.w.g)
 ```
 Log-Likelihood supports Weibull as well. 
 
@@ -178,15 +185,14 @@ diff_df <- data.frame(hour=flood_only$hour,
 ```
 
 ```{r flood model - build upgrade dataframe}
-
 # calculating what upgrades are best
 impact_df <- diff_df %>%
   mutate(max_impact = pmax(diff_servo, diff_backup, na.rm=T)) %>% # calculate row wise max of time difference
   filter(flood == 1 & max_impact > 0) %>% # filter for pumps that had flood target and a positive impact 
   # save which upgrade had the best impact
   mutate(upgrade = case_when(
-    max_impact == backup ~ 'backup',
-    max_impact == servo ~ 'servo',
+    max_impact == diff_backup ~ 'backup',
+    max_impact == diff_servo ~ 'servo',
     .default = NA)
   )
 
@@ -197,7 +203,7 @@ upgrade_costs <- data.frame(
 )
 
 # left-join the costs to impact_df
-impact_df2 <- impact_df2 %>%
+impact_df2 <- impact_df %>%
   left_join(upgrade_costs, by='upgrade')
 
 # how much to upgrade all the pumps?
@@ -217,5 +223,4 @@ cat('Cost of subset pump upgrades: ', sum(pumps_to_upgrade$cost*1000), '\n')
 cat('Total pump life extended by upgrades: ', 
     round(sum(pumps_to_upgrade$max_impact), 2), 'hours \n')
 ```
-
 
