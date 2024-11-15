@@ -1,0 +1,207 @@
+---
+title: "MLHW2"
+output: html_document
+date: "2024-11-12"
+---
+
+```{r}
+train <- read.csv("insurance_t.csv")
+```
+
+```{r}
+library(tidyverse)
+library(DataExplorer)
+library(DescTools)
+library(xgboost)
+library(caret)
+```
+
+Indicators & any variable with < 10 distinct values are categorical
+```{r}
+table((train$MMCRED))
+table((train$CCPURC))
+```
+
+Categorical variables
+```{r}
+# ordinal
+train$MMCRED <-as.factor(train$MMCRED)
+train$CCPURC <- as.factor(train$CCPURC)
+
+# binary
+train$DDA <- as.factor(train$DDA)
+train$DIRDEP <- as.factor(train$DIRDEP)
+train$NSF <- as.factor(train$NSF)
+train$SAV <- as.factor(train$SAV)
+train$ATM <- as.factor(train$ATM)
+train$CD <- as.factor(train$CD)
+train$IRA <- as.factor(train$IRA)
+train$INV <- as.factor(train$INV)
+train$MM <- as.factor(train$MM)
+train$CC <- as.factor(train$CC)
+train$SDB <- as.factor(train$SDB)
+train$INAREA <- as.factor(train$INAREA)
+train$CCPURC <- as.factor(train$CCPURC)
+
+# target variable
+train$INS <- as.factor(train$INS)
+```
+
+```{r}
+plot_missing(train)
+```
+
+Imputation
+```{r}
+# median for continuous
+train <- train %>%
+  mutate(across(where(is.numeric), ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+
+# mode for categorical (CC, INV)
+train <- train %>%
+  mutate(CC = ifelse(is.na(CC), Mode(CC, na.rm = TRUE), CC))
+train <- train %>%
+  mutate(INV = ifelse(is.na(INV), Mode(INV, na.rm = TRUE), INV))
+train <- train %>%
+  mutate(CCPURC = ifelse(is.na(CCPURC), Mode(CCPURC, na.rm = TRUE), CCPURC))
+
+```
+```{r}
+plot_missing(train)
+```
+Random Forest
+```{r}
+library(randomForest)
+library(tuneR)
+train_df <- as.data.frame(train)
+set.seed(12345)
+rf.ins <- randomForest(INS ~ ., data = train_df, ntree = 50, importance = TRUE)
+plot(rf.ins, main = 'Number of trees compared to MSE')
+```
+
+```{r}
+#Tune Model
+set.seed(12345)
+best_mtry <- tuneRF(x = train_df[, -which(names(train_df) == "INS")],  y = train_df$INS, ntreeTry = 50, stepFactor = 1.5, improve = 0.01, trace = TRUE, plot = TRUE)
+
+optimal_mtry <- best_mtry[which.min(best_mtry[, 2]), "mtry"]
+```
+```{r}
+#Train final model with optimal mtry
+rf.ins <- randomForest(INS ~ ., data = train_df, ntree = 50, mtry = optimal_mtry, importance = TRUE)
+plot(rf.ins, main = 'Number of trees compared to MSE')
+```
+
+
+
+```{r}
+#Variable Importance
+varImpPlot(rf.ins,
+           sort = TRUE,
+           n.var = 25, 
+           main = 'Top 25 variables',
+           cex = 0.5)
+
+importance(rf.ins)
+```
+ROC Curve
+```{r}
+train_df$p_hat <- as.vector(predict(rf.ins, type = "prob")[, 2])
+logit_roc <- rocit(score = train_df$p_hat, class = train_df$INS)
+auc_value <- ciAUC(logit_roc, level = 0.99)
+
+cat("AUC:", auc_value$AUC, "\n")
+cat("Confidence Interval:", auc_value$lower, "-", auc_value$upper, "\n")
+
+plot(logit_roc, main = "ROC Curve")
+
+optimal_cutoff <- logit_roc$cutoff[which.max(logit_roc$TPR - logit_roc$FPR)]
+abline(v = optimal_cutoff, col = "red", lty = 2)
+cat("Optimal Cutoff:", optimal_cutoff, "\n")
+```
+XGBoost
+```{r}
+train_x <- model.matrix(INS ~ ., data = train_df)[,-1]
+train_y <- as.numeric(train_df$INS) - 1
+params <- list(objective = "binary:logistic", eval_metric = "auc", subsample = 0.5)
+set.seed(12345)
+xgb.ins <- xgboost(data = train_x, label = train_y, params = params, nrounds = 50)
+print(xgb.ins)
+```
+```{r}
+xgbcv.ins <- xgb.cv(data = train_x, label = train_y, params = params, nrounds = 50, nfold = 10)
+```
+Tuning XGBoost
+```{r}
+tune_grid <- expand.grid(
+  nrounds = 50,
+  eta = c(0.1, .15, .2,.25,.3),
+  max_depth = c(1:10),
+  gamma = c(0),
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = c(0.25, 0.5, 0.75, 1)
+)
+
+train_y <- factor(train_y, levels = c(0, 1))
+
+xgb.ins.caret <- train(x = train_x, y = train_y,
+                       method = 'xgbTree',
+                       tuneGrid = tune_grid,
+                       trControl = trainControl(method = 'cv', number = 10))
+# Set a new output path for the plot
+output_path <- "/Users/kushagrabansal/Desktop/plot.png"
+
+# Save the plot to a specific file
+png(output_path)
+plot(xgb.ins.caret)
+
+#Looks most optimized at subsample 1, 0.1 shrinkage, 6 tree depth
+```
+Tune the Model
+```{r}
+params <- list(objective = "binary:logistic", eval_metric = "auc", subsample = 1, eta = 0.1, max_depth = 6)
+set.seed(12345)
+train_y <- as.numeric(train_df$INS) - 1
+xgb.ins <- xgboost(data = train_x, label = train_y, params = params, nrounds = 50)
+print(xgb.ins)
+```
+
+Variable Importance
+```{r}
+library(Ckmeans.1d.dp)
+xgb.importance(feature_names = colnames(train_x), model = xgb.ins)
+xgb.ggplot.importance(xgb.importance(feature_names = colnames(train_x), model = xgb.ins)) + theme(axis.text.y = element_text(size = 5))
+```
+
+XGBoost ROC Curve
+
+```{r}
+#Area Under the ROC Curve for All
+train_df$INS <- factor(train_df$INS, levels = c(0, 1))
+
+xgball <- xgb.ins
+train_df$p_hat <- predict(xgball, newdata = train_x, type = "response")
+train_df$p_hat_vector <- as.numeric(as.character(train_df$p_hat))
+xgball_roc <- rocit(train_df$p_hat_vector, train_df$INS)
+plot(xgball_roc)
+plot(xgball_roc)$optimal
+summary(xgball_roc) #AUC =0.8943
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
