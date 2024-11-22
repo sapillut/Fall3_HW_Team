@@ -1,0 +1,149 @@
+---
+title: "SAHW_3"
+output: html_document
+date: "2024-11-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(flexsurv)
+library(zoo)
+data <- read.csv("hurricane")
+#Create id for each pump & rename hour for next step
+data <- data %>%
+  mutate(PumpID = row_number()) 
+```
+
+```{r}
+missing_count <- tibble(
+  variable = names(data),
+  count = colSums(is.na(data))
+)
+# number of missing is strongly correlated with hours
+# assuming missing is due to pump failure
+# no columns other than H1-H48 is missing data, so safe to impute 0's to NAs
+data[is.na(data)] <- 0
+```
+
+
+```{r}
+#Trashrack has quasi separation issues, will remove
+table(data$trashrack, data$reason == 2)
+data <- data %>% select(-trashrack)
+```
+
+
+```{r}
+#full model, start with variable selection
+full_model <- coxph(Surv(hour, reason == 2) ~ age + backup + bridgecrane + elevation + gear + servo + slope, data = data)
+summary(full_model)
+```
+```{r}
+#backwards selection
+empty_model <- coxph(Surv(hour, reason == 2) ~ 1, data = data)
+backwards_model <- step(full_model,
+                   scope = list(lower = empty_model, 
+                                upper = full_model),
+                   direction = "backward", k=qchisq(0.03, 1, lower.tail=FALSE))
+summary(backwards_model)
+#looks like running for 12 hrs isn't significant
+```
+
+```{r}
+concordance(backwards_model)
+```
+
+```{r}
+survminer::ggcoxfunctional(backwards_model, data = data)
+```
+
+```{r}
+#Bin variables because it doesn't seem to meet linearity
+data2 <- data %>% mutate(agebin = case_when(
+  age < 7 ~ 0,
+  age < 9 ~ 1,
+  age >= 9 ~ 2),
+  slopebin = case_when(
+    slope < 5 ~ 0,
+    slope < 10 ~ 1,
+    slope >= 10 ~ 2))
+
+cox_model2 <- coxph(Surv(hour, reason == 2) ~ factor(agebin) + factor(slopebin) + servo, data = data2)
+
+summary(cox_model2)
+```
+
+```{r}
+#Proportional Hazard Test - Schoenfeld Residuals
+hurricane.ph.zph <- cox.zph(cox_model2)
+hurricane.ph.zph
+
+ggcoxzph(hurricane.ph.zph)
+#This looks good??? Seems our model only includes Age
+```
+```{r}
+#Pivot Longer
+data2$hour <- as.numeric(data2$hour)
+data3 <- data2 %>% rename(exact_hour = hour)
+data3 <- data3 %>%
+  pivot_longer(
+    cols = starts_with("h"),  
+    names_to = "time",                           
+    names_prefix = "h",                      
+    values_to = "PumpStatus"
+  ) %>%
+  mutate(
+    time = gsub("h", "", time),    
+    time = as.numeric(time),      
+    start = time - 1,
+    stop = time,
+    event = if_else(survive == 0 & reason == "2" & time == exact_hour, 1, 0),
+    other_event = if_else(survive == 0 & reason %in% c("1", "3", "4") & time == exact_hour, 1, 0)
+  )
+```
+
+```{r}
+#indicator for pump running 12 consecutive hours
+data3 <- data3 %>%
+  group_by(PumpID) %>% 
+  mutate(Running_12hr = rollapply(PumpStatus, width = 12, FUN = function(x) all(x == 1), fill = NA, align = "right"))
+```
+
+```{r}
+#Make sure no missing pumpStatus
+na_count <- data3 %>%
+  summarise(na_count = sum(is.na(PumpStatus))) %>%
+  pull(na_count)
+print(na_count)
+```
+```{r}
+data3 <- data3 %>%
+  mutate(Running_12hr = replace(Running_12hr, is.na(Running_12hr), FALSE))
+```
+
+
+```{r}
+data3 <- data3 %>%
+  group_by(PumpID) %>%
+  mutate(
+    first_failure_hour = min(row_number()[event == 1 | other_event == 1], na.rm = TRUE)
+  ) %>%
+  filter(row_number() <= first_failure_hour) %>%
+  select(-first_failure_hour) %>%
+  ungroup()
+```
+```{r}
+#Final Model
+final_model <- coxph(Surv(start, stop, event) ~ Running_12hr + factor(agebin), data = data3)
+summary(final_model)
+```
+
+
+
+
+
+
